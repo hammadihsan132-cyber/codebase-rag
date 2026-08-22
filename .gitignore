@@ -1,2 +1,8 @@
 .env
 __pycache__/
+
+# Generated RAG data
+data/chroma/
+
+# Cloned repositories used by the RAG system
+data/repos/

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     )
 
     # --- API keys ---
-    voyage_api_key: str = ""
+    gemini_api_key: str = ""
     groq_api_key: str = ""
     github_token: str = ""  # optional, raises GitHub API rate limits for private/large repos
 
@@ -24,8 +24,9 @@ class Settings(BaseSettings):
     chroma_persist_dir: Path = Path("./data/chroma")  # ChromaDB persistence dir
 
     # --- Embedding / generation models ---
-    embedding_model: str = "voyage-code-2"
-    generation_model: str = "llama-3.3-70b-versatile"
+    # embedding_model: str = "models/text-embedding-004"
+    embedding_model: str = "models/gemini-embedding-001"
+    generation_model: str = "openai/gpt-oss-120b"
 
     # --- Ingestion limits ---
     max_file_size_bytes: int = 1_000_000  # skip files larger than ~1MB (likely generated/binary)

@@ -135,6 +135,19 @@ def collection_exists(owner: str, repo: str) -> bool:
     return name in {c.name for c in client.list_collections()}
 
 
+def list_ingested_repos() -> list[dict]:
+    """Return metadata for every repo collection currently in ChromaDB."""
+    client = _get_client()
+    repos = []
+    for c in client.list_collections():
+        meta = c.metadata or {}
+        owner = meta.get("owner")
+        repo = meta.get("repo")
+        if owner and repo:
+            repos.append({"owner": owner, "repo": repo, "collection": c.name})
+    return repos
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     print("Existing collections:", [c.name for c in _get_client().list_collections()])

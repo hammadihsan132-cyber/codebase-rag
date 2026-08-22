@@ -97,7 +97,7 @@ class AnswerGenerator:
                     model=self._model,
                     messages=messages,
                     temperature=0.1,  # low temperature: we want grounded, consistent answers
-                    max_completion_tokens=1024,
+                    max_tokens=1024,
                 )
                 return response.choices[0].message.content
             except RateLimitError as e:
