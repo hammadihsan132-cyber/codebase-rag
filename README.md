@@ -148,6 +148,3 @@ Open `http://127.0.0.1:8000` — paste a GitHub URL, click **Ingest**, then pick
 - [ ] AI-proposed code edits: detect edit-intent questions, generate a reviewable diff against the cloned repo, and apply on explicit user confirmation (with VS Code integration to open/review the result)
 - [ ] Incremental re-ingestion (only re-embed changed files on `force_refresh`, instead of a full re-clone/re-embed)
 
-## License
-
-_(Add your license here — e.g. MIT.)_
