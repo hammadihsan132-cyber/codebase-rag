@@ -71,17 +71,29 @@ def ingest_repository(url: str, force_refresh: bool = False) -> IngestResult:
 
 
 def answer_question(
-    owner: str, repo: str, question: str, n_results: int = 10
+    owner: str,
+    repo: str,
+    question: str,
+    mode: str = "developer",
+    n_results: int = 10,
 ) -> GeneratedAnswer:
     """
-    Full query flow for an already-ingested repo: hybrid retrieve -> generate
-    a cited answer. Raises if nothing relevant is retrieved.
+    Full query flow for an already-ingested repo:
+    hybrid retrieve -> generate a cited answer.
+
+    mode controls the AI response style:
+    developer / student / debug / viva
     """
     retrieved = hybrid_search(owner, repo, question, n_results=n_results)
-    logger.info("Retrieved %d chunks for question: %r", len(retrieved), question)
+    logger.info(
+        "Retrieved %d chunks for question: %r (mode=%s)",
+        len(retrieved),
+        question,
+        mode,
+    )
 
     generator = AnswerGenerator()
-    return generator.generate(question, retrieved)
+    return generator.generate(question, retrieved, mode=mode)
 
 
 if __name__ == "__main__":
