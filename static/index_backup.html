@@ -1,0 +1,298 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>codebase-rag</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --accent-dim: #1f6feb;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2.5rem 1.5rem;
+  }
+  .wrap { width: 100%; max-width: 760px; }
+  h1 {
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin: 0 0 0.25rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  h1 .tag {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--accent);
+    border: 1px solid var(--accent-dim);
+    border-radius: 4px;
+    padding: 0.1rem 0.4rem;
+  }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.75rem; }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem;
+    margin-bottom: 1.25rem;
+  }
+  .row { display: flex; gap: 0.5rem; }
+  input[type="text"] {
+    flex: 1;
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 0.6rem 0.75rem;
+    font-size: 0.9rem;
+    font-family: var(--mono);
+  }
+  input[type="text"]:focus { outline: none; border-color: var(--accent-dim); }
+  button {
+    background: var(--accent-dim);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0.6rem 1.1rem;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { background: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  button.secondary:hover:not(:disabled) { border-color: var(--accent-dim); color: var(--text); }
+
+  .status { font-size: 0.82rem; margin-top: 0.6rem; color: var(--muted); min-height: 1.1em; }
+  .status.error { color: #f85149; }
+  .status.success { color: #3fb950; }
+
+  select {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 0.6rem 0.75rem;
+    font-size: 0.9rem;
+    font-family: var(--mono);
+  }
+
+  .qa { display: flex; flex-direction: column; gap: 1rem; }
+  .qa-item { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .q-bubble {
+    background: #1c2530;
+    padding: 0.7rem 1rem;
+    font-size: 0.88rem;
+    color: var(--accent);
+    font-weight: 500;
+  }
+  .a-bubble { padding: 0.9rem 1rem; font-size: 0.9rem; line-height: 1.55; white-space: pre-wrap; }
+  .citations {
+    border-top: 1px solid var(--border);
+    padding: 0.6rem 1rem;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--muted);
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  .citations .cite-title { color: var(--text); margin-bottom: 0.15rem; font-family: inherit; }
+
+  .empty-state { color: var(--muted); font-size: 0.85rem; text-align: center; padding: 2rem 0; }
+  .spinner {
+    display: inline-block; width: 12px; height: 12px;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 0.7s linear infinite; margin-right: 0.4rem;
+    vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>codebase-rag <span class="tag">local</span></h1>
+    <div class="subtitle">Paste a GitHub repo, then ask it questions in plain English.</div>
+
+    <div class="panel">
+      <div class="row">
+        <input type="text" id="repoUrl" placeholder="https://github.com/owner/repo" />
+        <button id="ingestBtn" onclick="doIngest()">Ingest</button>
+      </div>
+      <div class="status" id="ingestStatus"></div>
+    </div>
+
+    <div class="panel">
+      <div class="row" style="margin-bottom: 0.6rem;">
+        <select id="repoSelect" onchange="onRepoSelect()">
+          <option value="">Select an ingested repo…</option>
+        </select>
+        <button class="secondary" onclick="loadRepos()">Refresh</button>
+      </div>
+      <div class="row">
+        <input type="text" id="question" placeholder="How does authentication work in this repo?" onkeydown="if(event.key==='Enter') doQuery();" />
+        <button id="queryBtn" onclick="doQuery()">Ask</button>
+      </div>
+      <div class="status" id="queryStatus"></div>
+    </div>
+
+    <div class="qa" id="qaLog">
+      <div class="empty-state" id="emptyState">Ask a question after ingesting a repo — answers appear here with source citations.</div>
+    </div>
+  </div>
+
+<script>
+  const API = "";
+
+  async function loadRepos() {
+    const select = document.getElementById("repoSelect");
+    try {
+      const res = await fetch(`${API}/api/repos`);
+      const repos = await res.json();
+      const current = select.value;
+      select.innerHTML = '<option value="">Select an ingested repo…</option>';
+      repos.forEach(r => {
+        const opt = document.createElement("option");
+        opt.value = `${r.owner}/${r.repo}`;
+        opt.textContent = `${r.owner}/${r.repo}`;
+        select.appendChild(opt);
+      });
+      if (current) select.value = current;
+    } catch (e) {
+      console.error("Failed to load repos", e);
+    }
+  }
+
+  function onRepoSelect() {
+    // no-op hook, kept simple: selection just feeds doQuery()
+  }
+
+  function setStatus(id, text, kind) {
+    const el = document.getElementById(id);
+    el.textContent = text;
+    el.className = "status" + (kind ? " " + kind : "");
+  }
+
+  async function doIngest() {
+    const url = document.getElementById("repoUrl").value.trim();
+    if (!url) { setStatus("ingestStatus", "Paste a GitHub URL first.", "error"); return; }
+
+    const btn = document.getElementById("ingestBtn");
+    btn.disabled = true;
+    setStatus("ingestStatus", "", "");
+    setStatus("ingestStatus", "⏳ Cloning, chunking, and embedding — this can take a while on first ingest…", "");
+
+    try {
+      const res = await fetch(`${API}/api/ingest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Ingest failed");
+
+      setStatus(
+        "ingestStatus",
+        `✓ Ingested ${data.full_name} — ${data.files_processed} files, ${data.chunks_created} chunks, ${data.elapsed_seconds.toFixed(1)}s`,
+        "success"
+      );
+      await loadRepos();
+      document.getElementById("repoSelect").value = data.full_name;
+    } catch (e) {
+      setStatus("ingestStatus", `✗ ${e.message}`, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function doQuery() {
+    const repo = document.getElementById("repoSelect").value;
+    const question = document.getElementById("question").value.trim();
+    if (!repo) { setStatus("queryStatus", "Select an ingested repo first.", "error"); return; }
+    if (!question) { setStatus("queryStatus", "Type a question first.", "error"); return; }
+
+    const btn = document.getElementById("queryBtn");
+    btn.disabled = true;
+    setStatus("queryStatus", "", "");
+
+    const emptyState = document.getElementById("emptyState");
+    if (emptyState) emptyState.remove();
+
+    try {
+      const res = await fetch(`${API}/api/query`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo, question, n_results: 10 }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Query failed");
+
+      appendQA(question, data.answer, data.citations);
+      document.getElementById("question").value = "";
+    } catch (e) {
+      setStatus("queryStatus", `✗ ${e.message}`, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function appendQA(question, answer, citations) {
+    const log = document.getElementById("qaLog");
+    const item = document.createElement("div");
+    item.className = "qa-item";
+
+    const q = document.createElement("div");
+    q.className = "q-bubble";
+    q.textContent = "Q: " + question;
+    item.appendChild(q);
+
+    const a = document.createElement("div");
+    a.className = "a-bubble";
+    a.textContent = answer;
+    item.appendChild(a);
+
+    if (citations && citations.length) {
+      const cites = document.createElement("div");
+      cites.className = "citations";
+      const title = document.createElement("div");
+      title.className = "cite-title";
+      title.textContent = "Sources:";
+      cites.appendChild(title);
+      citations.forEach(c => {
+        const line = document.createElement("div");
+        const symbol = c.symbol_name ? ` (${c.symbol_name})` : "";
+        line.textContent = `[${c.index}] ${c.file_path}:${c.start_line}-${c.end_line}${symbol}`;
+        cites.appendChild(line);
+      });
+      item.appendChild(cites);
+    }
+
+    log.prepend(item);
+  }
+
+  loadRepos();
+</script>
+</body>
+</html>

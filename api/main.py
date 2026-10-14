@@ -58,8 +58,9 @@ class IngestResponse(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    repo: str = Field(..., description="'owner/name', e.g. psf/requests")
+    repo: str
     question: str
+    mode: str = "developer"
     n_results: int = 10
 
 
