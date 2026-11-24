@@ -1,21 +1,32 @@
-﻿"""
-Takes a user's question plus the chunks retrieved for it, and produces a
-natural-language answer via Groq — with inline citations back to the
-specific files/line-ranges the answer draws from.
+﻿
+"""
+Generates repository-specific answers using OpenRouter.
 
-Formatting philosophy: this should read like GitHub Copilot Chat / Cursor,
-not like a document-RAG summarizer. Concise, scannable, minimal code dumps,
-structure only where it earns its keep.
+Default model: NVIDIA Nemotron 3.5 Lightning
+Advanced model: Qwen4 Max
+
+Features:
+- Repository-grounded answers
+- Inline source citations
+- Reasoning effort control
+- Empty-response recovery
+- API retry and error handling
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 
-import groq
-from groq import APIError, RateLimitError
+from openai import (
+    OpenAI,
+    APIError,
+    APIConnectionError,
+    APITimeoutError,
+    RateLimitError,
+)
 
 from config import settings
 from src.retrieval.hybrid_retriever import RetrievedChunk
@@ -23,51 +34,62 @@ from src.retrieval.hybrid_retriever import RetrievedChunk
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
+_MAX_OUTPUT_TOKENS = 4096
 
-_SYSTEM_PROMPT = """You are an expert code intelligence assistant embedded in a developer tool \
-(in the spirit of GitHub Copilot Chat, Cursor, or Sourcegraph Cody). You answer questions about \
-one specific GitHub repository using ONLY the numbered code excerpts provided to you.
+_SYSTEM_PROMPT = """You are an expert code intelligence assistant embedded in
+a developer tool similar to GitHub Copilot Chat or Cursor.
 
-RESPONSE STYLE — non-negotiable:
-- Be concise. Prefer short paragraphs and bullet points over long prose. Developers scan, they don't read essays.
-- Use markdown headers (##, ###) ONLY when the question actually calls for structure (an overview, an \
-architecture explanation). For a narrow question ("what does function X do?"), just answer directly in \
-a few sentences — do not force headers onto a two-sentence answer.
-- When showing code, show ONLY the minimal relevant excerpt (a function, a class, a handful of lines) — \
-never reproduce an entire file. Trim to what's needed to make the point.
-- If the question is broad and unscoped (e.g. "show me all the code", "give me the whole project", \
-"give me the code of this project"), do NOT dump code from every excerpt. Instead, give a short \
-project map: list the key files/modules with a one-line purpose each, then ask which part the user \
-wants to see in detail.
-- Every factual claim about the code must cite its source excerpt inline using [1], [2], etc., placed \
-immediately after the claim it supports. If multiple excerpts support one point, cite all: [1][3].
-- Do NOT add your own "Sources", "References", or citation list at the end of your answer — the \
-application renders citations separately. Cite inline only, then stop.
-- If the excerpts don't contain enough information to answer, say so directly instead of guessing or \
-padding the answer with generic knowledge.
+You answer questions about one specific GitHub repository using ONLY
+the numbered code excerpts provided to you.
 
-FORMAT BY QUESTION TYPE (guide, not a rigid template — use judgment):
-- "What does X do?" / "How does X work?" -> 2-4 sentences, one small excerpt if it helps, inline citations.
-- "Give me an overview" / "Tell me about this project" -> a few short bullet groups (Purpose, \
-Architecture, Tech stack, Key components) — bullets, not paragraphs.
-- "Show me the code for X" (a specific, named file/function) -> show that excerpt directly, briefly \
-explain what it does.
-- "Show me all the code" / "give me the whole project" (broad, unscoped) -> do NOT dump code. Give the \
-project map described above instead.
+RESPONSE STYLE:
+
+- Be concise and use simple, clear explanations.
+- Prefer short paragraphs and bullet points.
+- Use markdown headers only when necessary.
+- Show only relevant code excerpts.
+- Never reproduce an entire file unnecessarily.
+- Do not invent repository functionality.
+- Every factual claim about code must cite its source using [1], [2], etc.
+- Place citations immediately after the claims they support.
+- Do not create a separate Sources or References section.
+- If the provided excerpts are insufficient, clearly say so.
+
+QUESTION TYPES:
+
+1. What does X do?
+   Give a concise explanation with citations.
+
+2. Explain project architecture.
+   Explain key modules, components and their relationships.
+
+3. Show code for X.
+   Display the relevant code excerpt and explain it.
+
+4. Show the whole project.
+   Provide a project map instead of dumping every file.
+
+5. Debugging questions.
+   Identify relevant code, explain the likely issue and
+   distinguish verified facts from possible causes.
+
+Always prioritize repository evidence over assumptions.
 """
 
 _BROAD_DUMP_PATTERNS = [
     r"\ball\s+(the\s+)?code\b",
-    r"\bentire\s+(code\s*base|project|repo(sitory)?)\b",
-    r"\bwhole\s+(project|repo(sitory)?|code\s*base)\b",
+    r"\bentire\s+(codebase|project|repository|repo)\b",
+    r"\bwhole\s+(project|repository|repo|codebase)\b",
     r"\bcode\s+of\s+this\s+project\b",
     r"\bevery\s+file\b",
     r"\bfull\s+source\s*code\b",
 ]
 
 _TRAILING_SOURCES_RE = re.compile(
-    r"\n{1,3}\**\s*(sources|references)\s*:?\**\s*\n(?:.*\n?)*$",
-    re.IGNORECASE,
+    r"\n{1,2}\s{0,3}(?:#{1,3}\s*)?"
+    r"(?:sources|references)\s*:?\s*\n"
+    r".*$",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -87,18 +109,38 @@ class GeneratedAnswer:
 
 
 def _is_broad_dump_request(question: str) -> bool:
-    q = question.lower()
-    return any(re.search(pattern, q) for pattern in _BROAD_DUMP_PATTERNS)
+    question = question.lower()
+
+    return any(
+        re.search(pattern, question)
+        for pattern in _BROAD_DUMP_PATTERNS
+    )
 
 
-def _build_context_block(chunks: list[RetrievedChunk]) -> tuple[str, list[Citation]]:
+def _build_context_block(
+    chunks: list[RetrievedChunk],
+) -> tuple[str, list[Citation]]:
+
     blocks = []
     citations = []
+
     for i, chunk in enumerate(chunks, start=1):
-        label = f"{chunk.file_path}:{chunk.start_line}-{chunk.end_line}"
+
+        label = (
+            f"{chunk.file_path}:"
+            f"{chunk.start_line}-{chunk.end_line}"
+        )
+
         if chunk.symbol_name:
-            label += f" ({chunk.chunk_type} {chunk.symbol_name})"
-        blocks.append(f"[{i}] {label}\n```\n{chunk.content}\n```")
+            label += (
+                f" ({chunk.chunk_type} {chunk.symbol_name})"
+            )
+
+        blocks.append(
+            f"[{i}] {label}\n"
+            f"```\n{chunk.content}\n```"
+        )
+
         citations.append(
             Citation(
                 index=i,
@@ -108,80 +150,289 @@ def _build_context_block(chunks: list[RetrievedChunk]) -> tuple[str, list[Citati
                 symbol_name=chunk.symbol_name,
             )
         )
+
     return "\n\n".join(blocks), citations
 
 
 def _strip_trailing_sources_section(text: str) -> str:
-    """Remove a model-added Sources/References footer, if any slipped through."""
+    """Remove model-generated Sources/References footers."""
+
     return _TRAILING_SOURCES_RE.sub("", text).rstrip()
 
 
-class AnswerGenerator:
-    def __init__(self, api_key: str | None = None, model: str | None = None):
-        self._client = groq.Groq(api_key=api_key or settings.groq_api_key)
-        self._model = model or settings.generation_model
+def _filter_cited(
+    answer_text: str,
+    citations: list[Citation],
+) -> list[Citation]:
+    """Return only citations referenced by the answer."""
 
-    def generate(self, question: str, retrieved_chunks: list[RetrievedChunk]) -> GeneratedAnswer:
+    return [
+        citation
+        for citation in citations
+        if re.search(
+            rf"(?<!\d)\[{citation.index}\](?!\d)",
+            answer_text,
+        )
+    ]
+
+
+class AnswerGenerator:
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+    ):
+
+        self._client = OpenAI(
+            api_key=api_key or settings.openrouter_api_key,
+            base_url=settings.openrouter_base_url,
+            timeout=120.0,
+            max_retries=0,
+        )
+
+        self._model = model or settings.openrouter_chat_model
+
+    def generate(
+        self,
+        question: str,
+        retrieved_chunks: list[RetrievedChunk],
+        advanced: bool = False,
+    ) -> GeneratedAnswer:
+
         if not retrieved_chunks:
             return GeneratedAnswer(
-                answer="I couldn't find any relevant code for that question in this repository.",
+                answer=(
+                    "I couldn't find any relevant code "
+                    "for that question in this repository."
+                ),
                 citations=[],
             )
 
-        context_block, citations = _build_context_block(retrieved_chunks)
-        user_prompt = f"Retrieved excerpts:\n\n{context_block}\n\nQuestion: {question}"
+        selected_model = (
+            settings.openrouter_advanced_model
+            if advanced
+            else self._model
+        )
+
+        context_block, citations = _build_context_block(
+            retrieved_chunks
+        )
+
+        user_prompt = (
+            f"Retrieved repository excerpts:\n\n"
+            f"{context_block}\n\n"
+            f"Question: {question}"
+        )
 
         if _is_broad_dump_request(question):
             user_prompt += (
-                "\n\nNote: this question is broad and unscoped. Per your instructions, do NOT dump "
-                "code from all excerpts above — give a short project map (files/modules + one-line "
-                "purpose each) and ask what the user wants to zoom into."
+                "\n\nThis is a broad question. Do not dump "
+                "the entire codebase. Instead, provide a "
+                "short project map with relevant files "
+                "and their purposes."
             )
 
         messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
+            {
+                "role": "system",
+                "content": _SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": user_prompt,
+            },
         ]
 
-        answer_text = self._complete_with_retry(messages)
-        answer_text = _strip_trailing_sources_section(answer_text)
-        used_citations = _filter_cited(answer_text, citations)
-        return GeneratedAnswer(answer=answer_text, citations=used_citations)
+        answer_text = self._complete_with_retry(
+            messages,
+            model=selected_model,
+        )
 
-    def _complete_with_retry(self, messages: list[dict]) -> str:
-        last_error: Exception | None = None
+        answer_text = _strip_trailing_sources_section(
+            answer_text
+        )
+
+        used_citations = _filter_cited(
+            answer_text,
+            citations,
+        )
+
+        return GeneratedAnswer(
+            answer=answer_text,
+            citations=used_citations,
+        )
+
+    def _complete_with_retry(
+        self,
+        messages: list[dict],
+        model: str | None = None,
+    ) -> str:
+
+        selected_model = model or self._model
+        last_error = None
+
+        # Nemotron uses low reasoning for ordinary questions.
+        # Qwen uses high reasoning for advanced questions.
+        is_advanced = (
+            selected_model == settings.openrouter_advanced_model
+        )
+
+        reasoning_effort = (
+            "high" if is_advanced else "low"
+        )
+
         for attempt in range(1, _MAX_RETRIES + 1):
+
             try:
-                response = self._client.chat.completions.create(
-                    model=self._model,
-                    messages=messages,
-                    temperature=0.1,
-                    max_tokens=1024,
+
+                request_options = {
+                    "model": selected_model,
+                    "messages": messages,
+                    "temperature": 0.1,
+                    "max_tokens": _MAX_OUTPUT_TOKENS,
+                }
+
+                # First attempt uses the selected reasoning effort.
+                # Second attempt omits reasoning controls if the
+                # provider returns an empty response.
+                if attempt == 1:
+                    request_options["extra_body"] = {
+                        "reasoning": {
+                            "effort": reasoning_effort
+                        }
+                    }
+
+                response = (
+                    self._client.chat.completions.create(
+                        **request_options
+                    )
                 )
-                return response.choices[0].message.content
-            except RateLimitError as e:
-                last_error = e
-                wait = 2 ** attempt
-                logger.warning("Groq rate limit hit (attempt %d/%d), backing off %ds", attempt, _MAX_RETRIES, wait)
-                import time
+
+                if not response.choices:
+                    raise RuntimeError(
+                        "OpenRouter returned no completion choices."
+                    )
+
+                choice = response.choices[0]
+                answer = choice.message.content
+
+                if not answer or not answer.strip():
+
+                    usage = response.usage
+                    reasoning_tokens = None
+
+                    if usage and usage.completion_tokens_details:
+                        reasoning_tokens = (
+                            usage.completion_tokens_details
+                            .reasoning_tokens
+                        )
+
+                    last_error = RuntimeError(
+                        "OpenRouter returned an empty answer."
+                    )
+
+                    logger.warning(
+                        "Empty response from %s. "
+                        "Attempt=%d/%d, finish_reason=%s, "
+                        "reasoning_tokens=%s",
+                        selected_model,
+                        attempt,
+                        _MAX_RETRIES,
+                        choice.finish_reason,
+                        reasoning_tokens,
+                    )
+
+                    if attempt < _MAX_RETRIES:
+                        time.sleep(2 ** attempt)
+                        continue
+
+                    break
+
+                logger.info(
+                    "Generated answer using model=%s, "
+                    "reasoning=%s, finish_reason=%s",
+                    selected_model,
+                    reasoning_effort,
+                    choice.finish_reason,
+                )
+
+                return answer.strip()
+
+            except RateLimitError as error:
+
+                last_error = error
+                wait = min(2 ** attempt, 30)
+
+                logger.warning(
+                    "OpenRouter rate limit hit. "
+                    "Attempt %d/%d. Retrying in %ds.",
+                    attempt,
+                    _MAX_RETRIES,
+                    wait,
+                )
+
+            except (
+                APIConnectionError,
+                APITimeoutError,
+            ) as error:
+
+                last_error = error
+                wait = min(2 ** attempt, 30)
+
+                logger.warning(
+                    "OpenRouter connection error: %s",
+                    error,
+                )
+
+            except APIError as error:
+
+                if (
+                    error.status_code is not None
+                    and error.status_code >= 500
+                ):
+                    last_error = error
+                    wait = min(2 ** attempt, 30)
+
+                    logger.warning(
+                        "OpenRouter server error: %s",
+                        error,
+                    )
+
+                else:
+                    raise
+
+            except RuntimeError as error:
+
+                last_error = error
+
+                logger.warning(
+                    "Generation attempt %d failed: %s",
+                    attempt,
+                    error,
+                )
+
+                wait = min(2 ** attempt, 30)
+
+            if attempt < _MAX_RETRIES:
                 time.sleep(wait)
-            except APIError as e:
-                last_error = e
-                logger.warning("Groq API error (attempt %d/%d): %s", attempt, _MAX_RETRIES, e)
-        raise RuntimeError(f"Groq generation failed after {_MAX_RETRIES} retries") from last_error
 
-
-def _filter_cited(answer_text: str, citations: list[Citation]) -> list[Citation]:
-    """Only surface citations the model actually referenced in its answer."""
-    return [c for c in citations if f"[{c.index}]" in answer_text]
+        raise RuntimeError(
+            f"OpenRouter generation failed after "
+            f"{_MAX_RETRIES} attempts. Last error: {last_error}"
+        ) from last_error
 
 
 if __name__ == "__main__":
+
     logging.basicConfig(level=logging.INFO)
 
     sample_chunks = [
         RetrievedChunk(
-            content="def add(a, b):\n    return a + b",
+            content=(
+                "def add(a, b):\n"
+                "    return a + b"
+            ),
             file_path="src/foo.py",
             symbol_name="add",
             chunk_type="function",
@@ -191,7 +442,16 @@ if __name__ == "__main__":
             matched_by={"vector", "bm25"},
         )
     ]
+
     generator = AnswerGenerator()
-    result = generator.generate("What does the add function do?", sample_chunks)
+
+    result = generator.generate(
+        "What does the add function do?",
+        sample_chunks,
+    )
+
+    print("\nGenerated answer:")
     print(result.answer)
+
+    print("\nCitations:")
     print(result.citations)
