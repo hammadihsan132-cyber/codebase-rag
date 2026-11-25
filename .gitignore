@@ -6,3 +6,5 @@ data/chroma/
 
 # Cloned repositories used by the RAG system
 data/repos/
+# Local runtime data
+data/
