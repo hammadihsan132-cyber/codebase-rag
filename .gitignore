@@ -8,3 +8,4 @@ data/chroma/
 data/repos/
 # Local runtime data
 data/
+.coverage

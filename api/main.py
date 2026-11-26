@@ -57,8 +57,12 @@ class IngestResponse(BaseModel):
     elapsed_seconds: float
 
 
+
 class QueryRequest(BaseModel):
-    repo: str = Field(..., description="'owner/name', e.g. psf/requests")
+    repo: str = Field(
+        ...,
+        description="'owner/name', e.g. psf/requests"
+    )
     question: str
     n_results: int = 10
 
@@ -116,12 +120,16 @@ def query(req: QueryRequest) -> QueryResponse:
         logger.exception("Query failed for %s/%s: %r", owner, repo_name, req.question)
         raise HTTPException(status_code=500, detail=f"Query failed: {e}") from None
 
+
+
+
+
     return QueryResponse(
         answer=result.answer,
         citations=[
             Citation(
                 index=c.index,
-                file_path=str(c.file_path),
+                file_path=str(c.file_path).replace("\\", "/"),
                 start_line=c.start_line,
                 end_line=c.end_line,
                 symbol_name=c.symbol_name,
@@ -129,6 +137,20 @@ def query(req: QueryRequest) -> QueryResponse:
             for c in result.citations
         ],
     )
+
+    # return QueryResponse(
+    #     answer=result.answer,
+    #     citations=[
+    #         Citation(
+    #             index=c.index,
+    #             file_path=str(c.file_path),
+    #             start_line=c.start_line,
+    #             end_line=c.end_line,
+    #             symbol_name=c.symbol_name,
+    #         )
+    #         for c in result.citations
+    #     ],
+    # )
 
 
 @app.get("/api/repos", response_model=list[RepoSummary])
